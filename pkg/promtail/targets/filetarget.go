@@ -17,7 +17,6 @@ import (
 
 	"github.com/grafana/loki/pkg/helpers"
 	"github.com/grafana/loki/pkg/promtail/api"
-
 	"github.com/grafana/loki/pkg/promtail/positions"
 )
 
@@ -198,7 +197,28 @@ func (t *FileTarget) sync() error {
 	// fsnotify.Watcher doesn't allow us to see what is currently being watched so we have to track it ourselves.
 	t.watches = dirs
 
-	t.updateTailers(matches)
+	// Start tailing all of the matched files if not already doing so.
+	for _, p := range matches {
+		err := t.startTailing(p)
+		if err != nil {
+			level.Error(t.logger).Log("msg", "sync() failed to start tailer", "error", err, "filename", p)
+			continue
+		}
+	}
+
+	// Stop tailing any files which no longer exist
+	existingTails := map[string]struct{}{}
+	for file := range t.tails {
+		existingTails[file] = struct{}{}
+	}
+	currentMatches := map[string]struct{}{}
+	for _, file := range matches {
+		currentMatches[file] = struct{}{}
+	}
+	toStopTailing := missing(currentMatches, existingTails)
+	for p := range toStopTailing {
+		t.stopTailing(p)
+	}
 
 	return nil
 }
@@ -234,31 +254,6 @@ func (t *FileTarget) stopWatching(dirs map[string]struct{}) {
 	}
 }
 
-func (t *FileTarget) updateTailers(matches []string) {
-	// Start tailing all of the matched files if not already doing so.
-	for _, p := range matches {
-		err := t.startTailing(p)
-		if err != nil {
-			level.Error(t.logger).Log("msg", "sync() failed to start tailer", "error", err, "filename", p)
-			continue
-		}
-	}
-
-	// Stop tailing any files which no longer exist
-	existingTails := map[string]struct{}{}
-	for file := range t.tails {
-		existingTails[file] = struct{}{}
-	}
-	currentMatches := map[string]struct{}{}
-	for _, file := range matches {
-		currentMatches[file] = struct{}{}
-	}
-	toStopTailing := missing(currentMatches, existingTails)
-	for p := range toStopTailing {
-		t.stopTailing(p)
-	}
-}
-
 func (t *FileTarget) startTailing(path string) error {
 	if _, ok := t.tails[path]; ok {
 		return nil
@@ -289,13 +284,11 @@ func (t *FileTarget) stopTailing(path string) {
 }
 
 // Returns the elements from set b which are missing from set a
-func missing(a map[string]struct{}, b map[string]struct{}) map[string]struct{} {
+func missing(as map[string]struct{}, bs map[string]struct{}) map[string]struct{} {
 	c := map[string]struct{}{}
-	for dir := range b {
-		if _, ok := a[dir]; ok {
-			continue
-		} else {
-			c[dir] = struct{}{}
+	for a := range bs {
+		if _, ok := as[a]; !ok {
+			c[a] = struct{}{}
 		}
 	}
 	return c
